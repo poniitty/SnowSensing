@@ -1,4 +1,52 @@
-calc_predictors <- function(image_df, site_name, base_landsat_dir){
+
+get_osm_glaciers_water <- function(full_aoi, osm_dir){
+  
+  # Download data
+  ost <- oe_get(st_bbox(full_aoi) %>% st_as_sfc %>% st_as_sf, 
+                download_directory = osm_dir, 
+                skip_vectortranslate = TRUE, download_only = TRUE)
+  
+  ost_gpkg <- oe_vectortranslate(ost, layer = "multipolygons")
+  
+  of <- oe_read(ost_gpkg, layer = "multipolygons")
+  gl <- of %>% 
+    filter(natural == "glacier") %>% 
+    st_transform(st_crs(full_aoi)) %>% 
+    select(osm_id)
+  wt <- of %>% 
+    filter(natural == "water") %>% 
+    st_transform(st_crs(full_aoi)) %>% 
+    select(osm_id)
+  
+  st_write(gl, paste0(osm_dir,"/glaciers.gpkg"), append = FALSE)
+  st_write(wt, paste0(osm_dir,"/waters.gpkg"), append = FALSE)
+  
+  unlink(c(ost, ost_gpkg))
+  rm(of, gl, wt)
+  gc()
+}
+
+
+make_vsicurl_url_dem <- function(base_url) {
+  paste0(
+    "/vsicurl", 
+    "?pc_url_signing=yes",
+    "&pc_collection=alos-dem",
+    "&url=",
+    base_url
+  )
+}
+make_vsicurl_url_esa <- function(base_url) {
+  paste0(
+    "/vsicurl", 
+    "?pc_url_signing=yes",
+    "&pc_collection=esa-worldcover",
+    "&url=",
+    base_url
+  )
+}
+
+calc_predictors <- function(image_df, site_name, base_landsat_dir, osm_dir, data_source = "rstac"){
   
   
   predictor_dir <- paste0(base_landsat_dir,"/",site_name,"/predictors")
@@ -17,156 +65,291 @@ calc_predictors <- function(image_df, site_name, base_landsat_dir){
     st_as_sfc() %>% 
     st_as_sf()
   
-  # AOI polygon to GEE format
-  aoi_ee <- aoi %>% st_transform(crs = 4326) %>% 
-    st_geometry() %>% 
-    sf_as_ee()
-  
-  # ALOS DEM
-  dataset <- ee$ImageCollection('JAXA/ALOS/AW3D30/V3_2')$filterBounds(geometry = aoi_ee)
-  dataset <- dataset$select("DSM")
-  
-  e <- try({ei <- dataset$getInfo()}, silent = T)
-  
-  if(class(e) != "try-error"){
-    dataset <- dataset$max()
-    dataset <- dataset$reproject(crs = paste0("EPSG:",epsg), scale = 30)
+  if(data_source == "rgee"){
+    # AOI polygon to GEE format
+    aoi_ee <- aoi %>% st_transform(crs = 4326) %>% 
+      st_geometry() %>% 
+      sf_as_ee()
     
-    task_img <- ee_image_to_drive(
-      image = dataset,
-      fileFormat = "GEO_TIFF",
-      folder = "dems",
-      region = aoi_ee,
-      scale = 30,
-      fileNamePrefix = paste0(site_name,"_ALOSDEM")
-    )
+    # ALOS DEM
+    dataset <- ee$ImageCollection('JAXA/ALOS/AW3D30/V3_2')$filterBounds(geometry = aoi_ee)
+    dataset <- dataset$select("DSM")
     
-    task_img$start()
-    ee_monitoring(task_img, max_attempts = 150)
+    e <- try({ei <- dataset$getInfo()}, silent = T)
     
-    flds <- drive_find(q = sprintf("name contains '%s'","dems"), type = "folder")
-    gls <- lapply(flds$id, drive_ls) %>% bind_rows()
-    
-    dl <- lapply(gls$id, function(x){
-      # x <- gls$id[1]
-      fnm <- paste0("ALOSDEM", ".tif")
+    if(class(e) != "try-error"){
+      dataset <- dataset$max()
+      dataset <- dataset$reproject(crs = paste0("EPSG:",epsg), scale = 30)
       
-      tdl <- try(dl <- drive_download(x, path = paste0(predictor_dir,"/",fnm), overwrite = TRUE), silent = T)
-      if(class(tdl)[1] == "try-error"){
-        tdl <- try(dl <- drive_download(x, path = paste0(predictor_dir,"/",fnm), overwrite = TRUE), silent = T)
-        if(class(tdl)[1] == "try-error"){
-          tdl <- try(dl <- drive_download(x, path = paste0(predictor_dir,"/",fnm), overwrite = TRUE), silent = T)
-        } else {
-          return(TRUE)
-        }
-      } else {
-        return(TRUE)
-      }
-    })
-    
-    drive_rm(drive_find(q = sprintf("name contains '%s'","dems"), type = "folder"))
-    
-  }
-  
-  # ESA LAND COVER
-  dataset <- ee$ImageCollection('ESA/WorldCover/v100')$filterBounds(geometry = aoi_ee)
-  dataset <- dataset$select("Map")
-  
-  e <- try({ei <- dataset$getInfo()}, silent = T)
-  
-  if(class(e) != "try-error"){
-    dataset <- dataset$max()
-    dataset <- dataset$reproject(crs = paste0("EPSG:",epsg), scale = 10)
-    
-    task_img <- ee_image_to_drive(
-      image = dataset,
-      fileFormat = "GEO_TIFF",
-      folder = "dems",
-      region = aoi_ee,
-      scale = 10,
-      fileNamePrefix = paste0(site_name,"_ESALC")
-    )
-    
-    task_img$start()
-    ee_monitoring(task_img, max_attempts = 150)
-    
-    flds <- drive_find(q = sprintf("name contains '%s'","dems"), type = "folder")
-    gls <- lapply(flds$id, drive_ls) %>% bind_rows()
-    
-    dl <- lapply(gls$id, function(x){
-      # x <- gls$id[1]
-      fnm <- paste0("ESALC", ".tif")
-      
-      tdl <- try(dl <- drive_download(x, path = paste0(predictor_dir,"/",fnm), overwrite = TRUE), silent = T)
-      if(class(tdl)[1] == "try-error"){
-        tdl <- try(dl <- drive_download(x, path = paste0(predictor_dir,"/",fnm), overwrite = TRUE), silent = T)
-        if(class(tdl)[1] == "try-error"){
-          tdl <- try(dl <- drive_download(x, path = paste0(predictor_dir,"/",fnm), overwrite = TRUE), silent = T)
-        } else {
-          return(TRUE)
-        }
-      } else {
-        return(TRUE)
-      }
-    })
-    
-    drive_rm(drive_find(q = sprintf("name contains '%s'","dems"), type = "folder"))
-  }
-  
-  # GLIMS
-  
-  dataset <- ee$FeatureCollection('GLIMS/20230607')$filterBounds(geometry = aoi_ee)
-  
-  e <- try({ei <- dataset$getInfo()}, silent = T)
-  
-  if(class(e)[[1]] != "try-error"){
-    
-    dataset <- dataset$
-      filter(ee$Filter$notNull(list("anlys_id")))$
-      reduceToImage(
-        properties = list("anlys_id"),
-        reducer = ee$Reducer$first()
+      task_img <- ee_image_to_drive(
+        image = dataset,
+        fileFormat = "GEO_TIFF",
+        folder = "dems",
+        region = aoi_ee,
+        scale = 30,
+        fileNamePrefix = paste0(site_name,"_ALOSDEM")
       )
-    
-    dataset <- dataset$gt(0.2)
-    
-    dataset <- dataset$reproject(crs = paste0("EPSG:",epsg), scale = 30)
-    
-    task_img <- ee_image_to_drive(
-      image = dataset,
-      fileFormat = "GEO_TIFF",
-      folder = "dems",
-      region = aoi_ee,
-      scale = 30,
-      fileNamePrefix = paste0(site_name,"_GLIMS")
-    )
-    
-    task_img$start()
-    ee_monitoring(task_img, max_attempts = 150)
-    
-    flds <- drive_find(q = sprintf("name contains '%s'","dems"), type = "folder")
-    gls <- lapply(flds$id, drive_ls) %>% bind_rows()
-    
-    dl <- lapply(gls$id, function(x){
-      # x <- gls$id[1]
-      fnm <- paste0("GLIMS", ".tif")
       
-      tdl <- try(dl <- drive_download(x, path = paste0(predictor_dir,"/",fnm), overwrite = TRUE), silent = T)
-      if(class(tdl)[1] == "try-error"){
+      task_img$start()
+      ee_monitoring(task_img, max_attempts = 150)
+      
+      flds <- drive_find(q = sprintf("name contains '%s'","dems"), type = "folder")
+      gls <- lapply(flds$id, drive_ls) %>% bind_rows()
+      
+      dl <- lapply(gls$id, function(x){
+        # x <- gls$id[1]
+        fnm <- paste0("ALOSDEM", ".tif")
+        
         tdl <- try(dl <- drive_download(x, path = paste0(predictor_dir,"/",fnm), overwrite = TRUE), silent = T)
         if(class(tdl)[1] == "try-error"){
           tdl <- try(dl <- drive_download(x, path = paste0(predictor_dir,"/",fnm), overwrite = TRUE), silent = T)
+          if(class(tdl)[1] == "try-error"){
+            tdl <- try(dl <- drive_download(x, path = paste0(predictor_dir,"/",fnm), overwrite = TRUE), silent = T)
+          } else {
+            return(TRUE)
+          }
         } else {
           return(TRUE)
         }
-      } else {
-        return(TRUE)
-      }
+      })
+      
+      drive_rm(drive_find(q = sprintf("name contains '%s'","dems"), type = "folder"))
+      
+    }
+    
+    # ESA LAND COVER
+    dataset <- ee$ImageCollection('ESA/WorldCover/v100')$filterBounds(geometry = aoi_ee)
+    dataset <- dataset$select("Map")
+    
+    e <- try({ei <- dataset$getInfo()}, silent = T)
+    
+    if(class(e) != "try-error"){
+      dataset <- dataset$max()
+      dataset <- dataset$reproject(crs = paste0("EPSG:",epsg), scale = 10)
+      
+      task_img <- ee_image_to_drive(
+        image = dataset,
+        fileFormat = "GEO_TIFF",
+        folder = "dems",
+        region = aoi_ee,
+        scale = 10,
+        fileNamePrefix = paste0(site_name,"_ESALC")
+      )
+      
+      task_img$start()
+      ee_monitoring(task_img, max_attempts = 150)
+      
+      flds <- drive_find(q = sprintf("name contains '%s'","dems"), type = "folder")
+      gls <- lapply(flds$id, drive_ls) %>% bind_rows()
+      
+      dl <- lapply(gls$id, function(x){
+        # x <- gls$id[1]
+        fnm <- paste0("ESALC", ".tif")
+        
+        tdl <- try(dl <- drive_download(x, path = paste0(predictor_dir,"/",fnm), overwrite = TRUE), silent = T)
+        if(class(tdl)[1] == "try-error"){
+          tdl <- try(dl <- drive_download(x, path = paste0(predictor_dir,"/",fnm), overwrite = TRUE), silent = T)
+          if(class(tdl)[1] == "try-error"){
+            tdl <- try(dl <- drive_download(x, path = paste0(predictor_dir,"/",fnm), overwrite = TRUE), silent = T)
+          } else {
+            return(TRUE)
+          }
+        } else {
+          return(TRUE)
+        }
+      })
+      
+      drive_rm(drive_find(q = sprintf("name contains '%s'","dems"), type = "folder"))
+    }
+    
+    # GLIMS
+    
+    dataset <- ee$FeatureCollection('GLIMS/20230607')$filterBounds(geometry = aoi_ee)
+    
+    e <- try({ei <- dataset$getInfo()}, silent = T)
+    
+    if(class(e)[[1]] != "try-error"){
+      
+      dataset <- dataset$
+        filter(ee$Filter$notNull(list("anlys_id")))$
+        reduceToImage(
+          properties = list("anlys_id"),
+          reducer = ee$Reducer$first()
+        )
+      
+      dataset <- dataset$gt(0.2)
+      
+      dataset <- dataset$reproject(crs = paste0("EPSG:",epsg), scale = 30)
+      
+      task_img <- ee_image_to_drive(
+        image = dataset,
+        fileFormat = "GEO_TIFF",
+        folder = "dems",
+        region = aoi_ee,
+        scale = 30,
+        fileNamePrefix = paste0(site_name,"_GLIMS")
+      )
+      
+      task_img$start()
+      ee_monitoring(task_img, max_attempts = 150)
+      
+      flds <- drive_find(q = sprintf("name contains '%s'","dems"), type = "folder")
+      gls <- lapply(flds$id, drive_ls) %>% bind_rows()
+      
+      dl <- lapply(gls$id, function(x){
+        # x <- gls$id[1]
+        fnm <- paste0("GLIMS", ".tif")
+        
+        tdl <- try(dl <- drive_download(x, path = paste0(predictor_dir,"/",fnm), overwrite = TRUE), silent = T)
+        if(class(tdl)[1] == "try-error"){
+          tdl <- try(dl <- drive_download(x, path = paste0(predictor_dir,"/",fnm), overwrite = TRUE), silent = T)
+          if(class(tdl)[1] == "try-error"){
+            tdl <- try(dl <- drive_download(x, path = paste0(predictor_dir,"/",fnm), overwrite = TRUE), silent = T)
+          } else {
+            return(TRUE)
+          }
+        } else {
+          return(TRUE)
+        }
+      })
+      
+      drive_rm(drive_find(q = sprintf("name contains '%s'","dems"), type = "folder"))
+    }
+    
+  } else {
+    s_obj <- stac("https://planetarycomputer.microsoft.com/api/stac/v1/")
+    
+    it_obj <- s_obj %>% 
+      stac_search(collections = "alos-dem",
+                  bbox = st_bbox(aoi %>% st_transform(4326)),
+                  limit = 1000) %>%
+      get_request()
+    
+    juuh <- lapply(it_obj$features, function(ft){
+      # ft <- it_obj$features[[1]]
+      
+      # print(ft$id)
+      full_url <- make_vsicurl_url_dem(assets_url(ft) %>% sort)
+      full_url <- full_url[endsWith(full_url, "_DSM.tif")]
+      file_names <- gsub("TIF$","tif",basename(full_url))
+      
+      juuh <- lapply(seq_len(length(full_url)), function(nr){
+        e <- try({
+          gdal_utils(
+            "warp",
+            source = full_url[[nr]],
+            destination = paste0(predictor_dir,"/",file_names[[nr]]),
+            options = c(
+              "-t_srs", st_crs(aoi)$wkt,
+              "-te", st_bbox(aoi),
+              "-tr", c(30, 30)
+            )
+          )
+        }, silent = TRUE)
+        if(class(e)[[1]] == "try-error"){
+          return(FALSE)
+        } else {
+          return(TRUE)
+        }
+      })
     })
     
-    drive_rm(drive_find(q = sprintf("name contains '%s'","dems"), type = "folder"))
+    dems <- list.files(predictor_dir, pattern = "_DSM.tif", full.names = TRUE)
+    
+    dems <- lapply(dems, function(x){
+      dem <- rast(x)
+      dem[dem == 0] <- NA
+      # dem <- resample(dem, r)
+      return(dem)
+    })
+    
+    dem <- sprc(dems)
+    dem <- mosaic(dem)
+    dem[dem < 0] <- 0
+    dem[is.na(dem)] <- 0
+    
+    writeRaster(dem, paste0(predictor_dir,"/ALOSDEM.tif"), overwrite = TRUE)
+    unlink(list.files(predictor_dir, pattern = "_DSM.tif", full.names = TRUE))
+    
+    # ESA WORLDCOVER
+    
+    s_obj <- stac("https://planetarycomputer.microsoft.com/api/stac/v1/")
+    
+    it_obj <- s_obj %>% 
+      stac_search(collections = "esa-worldcover",
+                  bbox = st_bbox(aoi %>% st_transform(4326)),
+                  datetime = "2021-01-01/2021-12-31",
+                  limit = 1000) %>%
+      get_request()
+    
+    juuh <- lapply(it_obj$features, function(ft){
+      # print(ft$id)
+      # ft <- it_obj$features[[1]]
+      full_url <- make_vsicurl_url_esa(assets_url(ft) %>% sort)
+      full_url <- full_url[endsWith(full_url, "_Map.tif")]
+      file_names <- gsub("TIF$","tif",basename(full_url))
+      
+      juuh <- lapply(seq_len(length(full_url)), function(nr){
+        e <- try({
+          gdal_utils(
+            "warp",
+            source = full_url[[nr]],
+            destination = paste0(predictor_dir,"/",file_names[[nr]]),
+            options = c(
+              "-t_srs", st_crs(aoi)$wkt,
+              "-te", st_bbox(aoi),
+              "-tr", c(10, 10)
+            )
+          )
+        }, silent = TRUE)
+        if(class(e)[[1]] == "try-error"){
+          return(FALSE)
+        } else {
+          return(TRUE)
+        }
+      })
+    })
+    
+    esas <- list.files(predictor_dir, pattern = "_Map.tif", full.names = TRUE)
+    
+    esas <- lapply(esas, function(x){
+      esa <- rast(x)
+      esa[esa == 0] <- NA
+      # dem <- resample(dem, r)
+      return(esa)
+    })
+    
+    esa <- sprc(esas)
+    esa <- mosaic(esa, fun = "max")
+    esa[esa < 0] <- 0
+    esa[is.na(esa)] <- 0
+    
+    writeRaster(esa, paste0(predictor_dir,"/ESALC.tif"), overwrite = TRUE)
+    unlink(list.files(predictor_dir, pattern = "_Map.tif", full.names = TRUE))
+    
+    # GLACIERS
+    gl <- st_read(paste0(osm_dir,"/glaciers.gpkg")) %>% 
+      st_transform(st_crs(dem)) %>% 
+      mutate(glacier = 1) %>% 
+      st_crop(st_bbox(dem))
+    
+    glr <- rasterize(vect(gl), dem, field = "glacier")
+    glr[is.na(glr)] <- 0
+    
+    writeRaster(glr, paste0(predictor_dir,"/GLIMS.tif"), overwrite = TRUE)
+    
+    # Waters
+    wt <- st_read(paste0(osm_dir,"/waters.gpkg")) %>% 
+      st_transform(st_crs(dem)) %>% 
+      mutate(waters = 1) %>% 
+      st_crop(st_bbox(dem))
+    
+    wtr <- rasterize(vect(wt), dem, field = "waters")
+    wtr[is.na(wtr)] <- 0
+    
+    writeRaster(wtr, paste0(predictor_dir,"/OSM_WATERS.tif"), overwrite = TRUE)
+    
   }
-  
   
   ############################################################
   # DEM VARIABLES
@@ -471,6 +654,6 @@ calc_predictors <- function(image_df, site_name, base_landsat_dir){
   writeRaster(round(r1, 4), paste0(predictor_dir, "/medianindices.tif"),
               overwrite = T)
   
-  unlink(list.files(tempdir(), full.names = T, recursive = T))
+  unlink(list.files(tempdir(), full.names = T))
   
 }

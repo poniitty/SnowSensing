@@ -39,7 +39,12 @@ classify_landsat <- function(image_df, site_name, base_landsat_dir, model_path, 
   esaw[esaw != 1] <- 0
   esaw <- aggregate(esaw, 3, mean)
   esaw <- project(esaw, r)
-  
+  if(file.exists(paste0(predictor_dir,"/OSM_WATERS.tif"))){
+    wt <- rast(paste0(predictor_dir,"/OSM_WATERS.tif"))
+    wt <- project(wt, esaw)
+    esaw <- sum(wt, esaw)
+    esaw[esaw > 1] <- 1
+  }
   slope[esaw > 0.2] <- 0
   
   if(file.exists(paste0(predictor_dir, "/GLIMS.tif"))){
@@ -69,7 +74,7 @@ classify_landsat <- function(image_df, site_name, base_landsat_dir, model_path, 
 
 classifying_function <- function(imageid, image_df, predictor_dir, class_landsat_dir, site_name, saga, 
                                  mod8, mod7, mod5, swi, slope, esalc, esaw, glaciers, dem, svf){
-  # imageid <- "LC08_L2SP_217015_20220320_20220329_02_T1_122734GMT.tif"
+  # imageid <- "LC08_L2SP_196013_20220504_20220518_02_T1_101656GMT.tif"
   if(!file.exists(paste0(class_landsat_dir, "/", imageid))){
     
     # print(imageid)
@@ -270,80 +275,101 @@ classifying_function <- function(imageid, image_df, predictor_dir, class_landsat
         filter(!is.na(QA)) %>% 
         mutate(across(ends_with("tpi"), ~ifelse(is.na(.x), 0, .x)))
       
-      layers <- c("B1","B2","B3","B4","B5","B6","B7",
-                  names(d %>% select(ends_with("_min5"), ends_with("_max5"), ends_with("_std5")) %>% 
-                          select(-starts_with("B2"))))
-      for(i in layers){
-        # print(i)
-        layers <- layers[-1]
-        for(ii in layers){
-          d[,paste(i, ii, sep = "_")] <- (d[,i]-d[,ii])/(d[,i]+d[,ii])
-        }
-      }
-      
-      d <- d %>% 
-        mutate(satid = ifelse(satid == "LT04", "LT05", satid))
-      
-      d <- d %>% 
-        mutate(across(everything(), ~ifelse(is.nan(.x), 0, .x))) #%>% 
-      # mutate(across(all_of(c("esalc","glcfcs")), factor))
-      
-      std_names <- names(d)[grepl("_std", names(d))]
-      d <- d %>% 
-        mutate(across(all_of(std_names), ~ifelse(is.na(.x), 0, .x)))
-      
-      # PREDICTIONS
-      if(satid %in% c("LT05","LT04")){
-        preds <- predict(mod5, d, importance = "none", na.action = "na.omit")
-        preds <- tibble(pred = preds$class) %>% 
-          bind_cols(preds$predicted %>% as.data.frame()) %>% 
-          mutate(across(`1`:`5`, ~round(.x*100)))
-      }
-      if(satid == "LE07"){
-        preds <- predict(mod7, d, importance = "none", na.action = "na.omit")
-        preds <- tibble(pred = preds$class) %>% 
-          bind_cols(preds$predicted %>% as.data.frame()) %>% 
-          mutate(across(`1`:`4`, ~round(.x*100)))
-      }
-      if(satid == "LC08"){
-        preds <- predict(mod8, d, importance = "none", na.action = "na.omit")
-        preds <- tibble(pred = preds$class) %>% 
-          bind_cols(preds$predicted %>% as.data.frame()) %>% 
-          mutate(across(`1`:`4`, ~round(.x*100)))
-      }
-      # d %>% select(-RADSAT) %>% filter(!complete.cases(.))
-      rm(d)
-      
-      if(nrow(preds) == length(na.omit(values(r[["QA"]], mat = F)))){
-        rr <- r[["QA"]]
-        rr[["class"]] <- 0
-        rr[["class"]][!is.na(r[["QA"]])] <- as.numeric(preds$pred)
-        rr[["land"]] <- 0
-        rr[["land"]][!is.na(r[["QA"]])] <- as.numeric(preds$`1`)
-        rr[["water"]] <- 0
-        rr[["water"]][!is.na(r[["QA"]])] <- as.numeric(preds$`2`)
-        rr[["snow"]] <- 0
-        rr[["snow"]][!is.na(r[["QA"]])] <- as.numeric(preds$`3`)
-        rr[["cloud"]] <- 0
-        rr[["cloud"]][!is.na(r[["QA"]])] <- as.numeric(preds$`4`)
-        rr[["artif"]] <- 0
-        if(satid %in% c("LT05","LT04")){
-          rr[["artif"]][!is.na(r[["QA"]])] <- as.numeric(preds$`5`)
-        }
+      if(nrow(d) == 0){
         
-        rr[is.na(r[["QA"]])] <- NA
+        rr <- r[["QA"]]
+        rr[["class"]] <- NA
+        rr[["land"]] <- NA
+        rr[["water"]] <- NA
+        rr[["snow"]] <- NA
+        rr[["cloud"]] <- NA
+        rr[["artif"]] <- NA
+        
         rr <- rr[[-1]]
         # plot(rr)
-        # plotRGB(r, r=7, g=5, b=2, stretch = "lin")
         writeRaster(rr, paste0(class_landsat_dir, "/", imageid),
                     datatype = "INT1U", overwrite = T)
+        
+        saga_remove_tmpfiles()
+        
+        return(imageid)
+        
       } else {
-        stop("FUUUUUUUUUUUUUUUUU")
+        layers <- c("B1","B2","B3","B4","B5","B6","B7",
+                    names(d %>% select(ends_with("_min5"), ends_with("_max5"), ends_with("_std5")) %>% 
+                            select(-starts_with("B2"))))
+        for(i in layers){
+          # print(i)
+          layers <- layers[-1]
+          for(ii in layers){
+            d[,paste(i, ii, sep = "_")] <- (d[,i]-d[,ii])/(d[,i]+d[,ii])
+          }
+        }
+        
+        d <- d %>% 
+          mutate(satid = ifelse(satid == "LT04", "LT05", satid))
+        
+        d <- d %>% 
+          mutate(across(everything(), ~ifelse(is.nan(.x), 0, .x))) #%>% 
+        # mutate(across(all_of(c("esalc","glcfcs")), factor))
+        
+        std_names <- names(d)[grepl("_std", names(d))]
+        d <- d %>% 
+          mutate(across(all_of(std_names), ~ifelse(is.na(.x), 0, .x)))
+        
+        # PREDICTIONS
+        if(satid %in% c("LT05","LT04")){
+          preds <- predict(mod5, d, importance = "none", na.action = "na.omit")
+          preds <- tibble(pred = preds$class) %>% 
+            bind_cols(preds$predicted %>% as.data.frame()) %>% 
+            mutate(across(`1`:`5`, ~round(.x*100)))
+        }
+        if(satid == "LE07"){
+          preds <- predict(mod7, d, importance = "none", na.action = "na.omit")
+          preds <- tibble(pred = preds$class) %>% 
+            bind_cols(preds$predicted %>% as.data.frame()) %>% 
+            mutate(across(`1`:`4`, ~round(.x*100)))
+        }
+        if(satid == "LC08"){
+          preds <- predict(mod8, d, importance = "none", na.action = "na.omit")
+          preds <- tibble(pred = preds$class) %>% 
+            bind_cols(preds$predicted %>% as.data.frame()) %>% 
+            mutate(across(`1`:`4`, ~round(.x*100)))
+        }
+        # d %>% select(-RADSAT) %>% filter(!complete.cases(.))
+        rm(d)
+        
+        if(nrow(preds) == length(na.omit(values(r[["QA"]], mat = F)))){
+          rr <- r[["QA"]]
+          rr[["class"]] <- 0
+          rr[["class"]][!is.na(r[["QA"]])] <- as.numeric(preds$pred)
+          rr[["land"]] <- 0
+          rr[["land"]][!is.na(r[["QA"]])] <- as.numeric(preds$`1`)
+          rr[["water"]] <- 0
+          rr[["water"]][!is.na(r[["QA"]])] <- as.numeric(preds$`2`)
+          rr[["snow"]] <- 0
+          rr[["snow"]][!is.na(r[["QA"]])] <- as.numeric(preds$`3`)
+          rr[["cloud"]] <- 0
+          rr[["cloud"]][!is.na(r[["QA"]])] <- as.numeric(preds$`4`)
+          rr[["artif"]] <- 0
+          if(satid %in% c("LT05","LT04")){
+            rr[["artif"]][!is.na(r[["QA"]])] <- as.numeric(preds$`5`)
+          }
+          
+          rr[is.na(r[["QA"]])] <- NA
+          rr <- rr[[-1]]
+          # plot(rr)
+          # plotRGB(r, r=7, g=5, b=2, stretch = "lin")
+          writeRaster(rr, paste0(class_landsat_dir, "/", imageid),
+                      datatype = "INT1U", overwrite = T)
+        } else {
+          stop("FUUUUUUUUUUUUUUUUU")
+        }
+        
+        saga_remove_tmpfiles()
+        
+        return(imageid)
       }
-      
-      saga_remove_tmpfiles()
-      
-      return(imageid)
     }
   }
 }

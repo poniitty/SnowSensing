@@ -12,20 +12,20 @@ conf_cirrus <- function(x) {as.numeric(paste(as.numeric(intToBits(x)[15:16]), co
 
 # image <- lss$file[1]
 calc_coverages <- function(image, image_dir){
-  
+  # image <- lss$file[[5]]
   require(terra)
-  
-  mask_cloud <- function(x) {as.numeric(intToBits(x)[4])}
   
   rs <- rast(paste0(image_dir,"/",image))
   rsn <- names(rs)
+  # plot(rs)
+  rs[[4]][is.na(rs[[4]])] <- 0
   
   cmask <- rs[[1]]
   cmask[] <- unlist(lapply(as.numeric(values(rs[[rsn[grepl("_pixel",rsn, ignore.case = T)]]])), mask_cloud))
   
   fill_prop <- mean(values(rs[[4]]) == 0)
   rs[[4]][cmask == 1] <- NA
-  cloud_prop <- mean(is.na(values(rs[[4]])))/(1-fill_prop)
+  cloud_prop <- mean(is.na(values(rs[[4]])))
   
   df <- tibble(file = image,
                fill_proportion = fill_prop,
